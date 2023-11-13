@@ -2,34 +2,43 @@ use std::fs;
 use std::env;
 use openssl::symm::{encrypt, decrypt, Cipher};
 use openssl::hash::{hash, MessageDigest};
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStrExt;
+use log::error;
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() != 4 {
-        eprintln!("Usage: {} <encrypt|decrypt> <key> <file>", args[0]);
-        std::process::exit(1);
-    }
-    let command = &args[1];
-    let key = &args[2];
-    let filename = &args[3];
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<OsString> = env::args_os().collect();
+    match args.as_slice() {
+        [_, command, key, filename] => {
+            let command = command.to_str().ok_or("Invalid command")?;
+            let key = key.to_str().ok_or("Invalid key")?;
+            let filename = filename.to_str().ok_or("Invalid filename")?;
 
-    // Hash the key to ensure it is 32 bytes long
-    let key_hash = hash(MessageDigest::sha256(), key.as_bytes()).expect("Failed to hash key");
-    let key_bytes = key_hash.as_ref(); // This ensures the key is always 32 bytes
+            // Derive the key using PBKDF2 to ensure it is 32 bytes long
+            let mut key_bytes = [0u8; 32];
+            let salt = [0u8; 16]; // Use a random salt for added security
+            let iterations = 10000; // Choose an appropriate number of iterations
+            openssl::pkcs5::pbkdf2_hmac(key.as_bytes(), &salt, iterations, MessageDigest::sha256(), &mut key_bytes)?;
 
-    let data = fs::read(filename).expect("Unable to read file");
-    let cipher = Cipher::aes_256_cbc();
+            let data = fs::read(filename)?;
 
-    let result = match command.as_str() {
-        "encrypt" => encrypt(cipher, key_bytes, None, &data)
-            .expect("Encryption failed"),
-        "decrypt" => decrypt(cipher, key_bytes, None, &data)
-            .expect("Decryption failed"),
+            let cipher = Cipher::aes_256_cbc();
+
+            let result = match command {
+                "encrypt" => encrypt(cipher, &key_bytes, None, &data)?,
+                "decrypt" => decrypt(cipher, &key_bytes, None, &data)?,
+                _ => {
+                    return Err(format!("Invalid command: {}", command).into());
+                }
+            };
+
+            let new_filename = format!("{}_new", filename);
+            fs::write(new_filename, result)?;
+        },
         _ => {
-            eprintln!("Invalid command: {}", command);
-            std::process::exit(1);
+            return Err("Usage: <encrypt|decrypt> <key> <file>".into());
         }
-    };
-
-    fs::write(filename, result).expect("Unable to write file");
+    }
+    
+    Ok(())
 }
